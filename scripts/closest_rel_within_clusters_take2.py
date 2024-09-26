@@ -1,34 +1,29 @@
-import pandas as pd 
+import pandas as pd
 from collections import defaultdict
 import re
 import requests
 import time
+import pytaxonkit
+import os
+
 
 def process_input_species_file(file_path):
     species = []
-    #species_names = []
-    df = pd.read_csv(file_path, delimiter='\t')
+    # species_names = []
+    df = pd.read_csv(file_path, delimiter="\t")
     for _, row in df.iterrows():
         species.append((row[0].rstrip("\\n"), row[9]))
-        #species_names.append(row[0].rstrip("\\n"))
-    
+        # species_names.append(row[0].rstrip("\\n"))
     return species
 
-file_path = '/hps/nobackup/flicek/ensembl/compara/sbhurji/Development/ECHO_project/alfatclust_trial/data/lepidoptera_species_unique_cores.csv'
-species = process_input_species_file(file_path)
-
-print("Number of input species", len(species))
 
 def process_ncbi_species(ncbi_file_path):
     ncbi_species = []
-    df = pd.read_csv(ncbi_file_path, delimiter=',')
+    df = pd.read_csv(ncbi_file_path, delimiter=",")
     for _, row in df.iterrows():
         ncbi_species.append(row.tolist())
+    return ncbi_species
 
-    return ncbi_species 
-
-ncbi_file_path = '/hps/nobackup/flicek/ensembl/compara/sbhurji/Development/ECHO_project/alfatclust_trial/data/ncbi_species_subspecies_lepidoptera.csv'
-ncbi_species = process_ncbi_species(ncbi_file_path)
 
 def partial_matches(species, ncbi_species):
     matches = []
@@ -40,16 +35,13 @@ def partial_matches(species, ncbi_species):
                 tax_id = sp2[0]
                 sps_name = sp2[2]
                 prod_name = sp[1]
-                matches.append((tax_id, sps_name,prod_name ))
+                matches.append((tax_id, sps_name, prod_name))
                 break
 
     for tax_id, sps_name, prod_name in matches:
         processed.setdefault(tax_id, []).append((sps_name, prod_name))
 
     return processed
-
-matched_list = partial_matches(species, ncbi_species)
-#print(matched_list)
 
 
 def parse_cluster_file(cluster_file):
@@ -68,50 +60,18 @@ def parse_cluster_file(cluster_file):
                 # Append line to current cluster
                 clusters[current_cluster].add(line)
 
-     # Convert sets to lists before returning
+    # Convert sets to lists before returning
     for cluster_number, values_set in clusters.items():
         clusters[cluster_number] = list(values_set)
 
     return clusters
 
-clusters = parse_cluster_file("/hps/nobackup/flicek/ensembl/compara/sbhurji/Development/ECHO_project/alfatclust_trial/results/rerun_with_unique_cores/lepidoptera_clusters_with_unique_cores.txt")
-#print(clusters)
-
-def get_rank(tax_id):
-
-    url = f"https://api.ncbi.nlm.nih.gov/datasets/v2alpha/taxonomy/taxon/{tax_id}/dataset_report"
-    response = requests.get(url)
-    response.raise_for_status()  
-    data = response.json()
-    taxonomies = data.get('reports', [])
-    for taxonomy in taxonomies:
-        #rank_name = taxonomy.get('taxonomy', {}).get('classification', {}).get('rank', {}).get('name')
-        rank = taxonomy.get('taxonomy', {}).get('rank')
-    return  rank
-
-def get_children(tax_id, max_retries=3, delay=5):
-    url = f"https://api.ncbi.nlm.nih.gov/datasets/v2alpha/taxonomy/taxon/{tax_id}/dataset_report"
-    for attempt in range(max_retries):
-        try:
-            response = requests.get(url)
-            response.raise_for_status()  # Raises an HTTPError if the response status code is 4XX or 5XX
-            data = response.json()
-            taxonomies = data.get('reports', [])
-            for taxonomy in taxonomies:
-                children = taxonomy.get('taxonomy', {}).get('children')
-                return children
-        except requests.exceptions.RequestException as e:
-            print(f"Attempt {attempt + 1} of {max_retries} failed: {e}")
-            if attempt < max_retries - 1:
-                print(f"Retrying in {delay} seconds...")
-                time.sleep(delay)
-        except ValueError as e:
-            print(f"An error occurred while processing the JSON response: {e}")
-            break
-        except KeyError as e:
-            print(f"An error occurred while accessing data: {e}")
-            break
-    return None
+def get_parents_pytaxon(tax_id):
+    result = pytaxonkit.lineage([tax_id])
+    lineage_string = result["FullLineageTaxIDs"].tolist()
+    for i in lineage_string:
+        val = i.split(";")
+        return list(map(int,val))
 
 def get_parents(tax_id, max_retries=3, delay=5):
     url = f"https://api.ncbi.nlm.nih.gov/datasets/v2alpha/taxonomy/taxon/{tax_id}/dataset_report"
@@ -120,9 +80,9 @@ def get_parents(tax_id, max_retries=3, delay=5):
             response = requests.get(url)
             response.raise_for_status()  # Raises an HTTPError if the response status code is 4XX or 5XX
             data = response.json()
-            taxonomies = data.get('reports', [])
+            taxonomies = data.get("reports", [])
             for taxonomy in taxonomies:
-                parents = taxonomy.get('taxonomy', {}).get('parents')
+                parents = taxonomy.get("taxonomy", {}).get("parents")
                 return parents
         except requests.exceptions.RequestException as e:
             print(f"Attempt {attempt + 1} of {max_retries} failed: {e}")
@@ -137,127 +97,136 @@ def get_parents(tax_id, max_retries=3, delay=5):
             break
     return None
 
+def get_sequences_from_pep(protein_header, input_pep_files, outfile):
+    
+    split_header = protein_header.split("_")
+    pep_file = '_'.join(split_header[2:8]) + "_translations.fa"
+    prot_id = split_header[0]
+    full_path = os.path.join(input_pep_files, pep_file)
+    with open(full_path, "r") as file:
+        write_sequence = False
+        for line in file:
+            if line.startswith(">"):
+                if prot_id == line.split(" ")[0][1:]:
+                    outfile.write(line)
+                    write_sequence = True
+                else:
+                    write_sequence = False
+            elif write_sequence:
+                outfile.write(line)
 
-def related_ids(tax_id):
-    url = url = f"https://api.ncbi.nlm.nih.gov/datasets/v2alpha/taxonomy/taxon/{tax_id}/related_ids"
-    response = requests.get(url)
-    response.raise_for_status()  # Raises an HTTPError if the response status code is 4XX or 5XX
-    data = response.json()
-    taxonomies = data.get('tax_ids', [])
+def get_proteins_from_taxid(tax_id, proteins, target, output_path, input_pep_files):
+    file_name = target + '_relatives.fa'
+    file_path = os.path.join(output_path, file_name)
+    if os.path.isfile(file_path):
+        mode = "a"
+    else:
+        mode = "w"
+    
+    with open(file_path, mode) as file:
+        for j in proteins:
+            split_header = j.split("_")
+            if str(tax_id) == split_header[-1]:
+                print(j)
+                seq = get_sequences_from_pep(j, input_pep_files, file)
 
-    return taxonomies
-
-def match_input_and_cluster_proteins(unique_tax_ids, desc, relative):
+def match_input_and_cluster_proteins(unique_tax_ids, desc, relative, number_of_relatives, proteins, target, output, input_pep_files):
     for i in desc:
-        #print(i)
+        # print(i)
         if i in unique_tax_ids and i not in relative:
-            #print("Append to relative", i)
             relative.append(i)
-            print("Append to relative", i)
+            prot_ids = get_proteins_from_taxid(i, proteins, target[0][1], output, input_pep_files)
+            if len(relative) == number_of_relatives:
+                break
 
-def get_filtered_subtree(tax_id, max_retries=3, delay=5):
-    url = f"https://api.ncbi.nlm.nih.gov/datasets/v2alpha/taxonomy/taxon/{tax_id}/filtered_subtree"
-    for attempt in range(max_retries):
-        try:
-            response = requests.get(url)
-            response.raise_for_status()  # Raises an HTTPError if the response status code is 4XX or 5XX
-            data = response.json()
-            taxonomies = data.get('reports', [])
-            for taxonomy in taxonomies:
-                children = taxonomy.get('taxonomy', {}).get('children')
-                return children
-        except requests.exceptions.RequestException as e:
-            print(f"Attempt {attempt + 1} of {max_retries} failed: {e}")
-            if attempt < max_retries - 1:
-                print(f"Retrying in {delay} seconds...")
-                time.sleep(delay)
-        except ValueError as e:
-            print(f"An error occurred while processing the JSON response: {e}")
-            break
-        except KeyError as e:
-            print(f"An error occurred while accessing data: {e}")
-            break
-    return None
+def get_all_desc(tax_id, desc):
+    result = pytaxonkit.list([tax_id])
+    for taxon, tree in result:
+        subtaxa = [t for t in tree.traverse]
+        for j in subtaxa:
+            if j[1] == "species":
+                desc.append(j[0])
+    return desc
 
+def get_lca(tax_ids):
+    lca = pytaxonkit.lca(tax_ids)
+    return lca
 
-def flatten(items):
-    """Yield items from any nested iterable; see Reference."""
-    for x in items:
-        if isinstance(x, list) and not isinstance(x, (str, bytes)):
-            for sub_x in flatten(x):
-                yield sub_x
-        else:
-            yield x
+def get_rel_args(ncbi_file_path_arg, file_path_arg, clusters_arg):
+    ncbi_file_path = ncbi_file_path_arg
+    ncbi_species = process_ncbi_species(ncbi_file_path)
+    file_path = file_path_arg
+    species = process_input_species_file(file_path)
+    print("Number of input species", len(species))
+    matched_list = partial_matches(species, ncbi_species)
+    clusters = parse_cluster_file(clusters_arg)
+    lca = get_lca(list(matched_list.keys()))
+    return matched_list, clusters, lca
 
-def get_all_descendants(desc):
-    all_desc = []
-    for i in desc:
-        tips = get_children(i)
-        all_desc.append(tips)
-    return list(flatten(all_desc))
+def get_sequences_for_fasta(proteins, input_pep_files, output_dir):
 
-def get_closest_rel_within_cluster(number_of_relatives,matched_list, clusters):
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
 
-    #result_dict = defaultdict(list)
+    output_file = os.path.join(output_dir, "clusters_with_less_proteins.fa")
+    
+    with open(output_file, "a") as outfile:
+        for i in proteins:
+            seq = get_sequences_from_pep(i, input_pep_files, outfile)
+                
+def get_closest_rel_within_cluster(
+    number_of_relatives, ncbi_file_path_arg, file_path_arg, clusters_arg, input_pep_files, output
+):
+    matched_list, clusters, lca = get_rel_args(
+        ncbi_file_path_arg, file_path_arg, clusters_arg
+    )
     for cluster_id, proteins in clusters.items():
         tax_id_of_protein = [int(p.split("_")[-1]) for p in proteins]
         unique_tax_ids = list(dict.fromkeys(tax_id_of_protein))
         print("Cluster No.", cluster_id)
-        #print("Cluster members", proteins)
-        #print("Tax id of the unique genomes the proteins belong to:",tax_id_of_protein)
         if len(unique_tax_ids) <= number_of_relatives:
-            to_write = proteins
-            #print(proteins)
-            #write code from get_fasta_of_closest_relatives.py to write these proteins to the fasta file
-        else:       
+            to_write = get_sequences_for_fasta(proteins, input_pep_files, output)
+        else:
             for tax_id, target in matched_list.items():
                 relative = []
+                immi_desc = []
                 print("tax_id", tax_id, "target", target)
-                #print(target[0][1])
-                children = get_children(tax_id)
-                print(f"Children of {tax_id}", children)
-                parents = get_parents(tax_id)
+                parents = get_parents_pytaxon(tax_id)
                 print(f"Parents of {tax_id}", parents)
-                #if children == None:
+                print(type(parents))
+                parents.pop()
                 parent = parents[-1]
-                #print(f"Immediate parent {parent}")
-                desc = get_children(parent)
-                print("descendants", desc)
-                #print("Unique tax ids:", unique_tax_ids)
-                get_relatives = match_input_and_cluster_proteins(unique_tax_ids, desc, relative)
-                print("The tax ids of the genomes that are present in the cluster and in ensembl", relative)
+                immi_parent_desc = get_all_desc(parent, immi_desc)
+                get_relatives = match_input_and_cluster_proteins(
+                    unique_tax_ids, immi_desc, relative, number_of_relatives, proteins, target, output, input_pep_files
+                )
+                print(
+                    "The tax ids of the genomes that are present in the cluster and in ensembl",
+                    relative,
+                )
                 while len(relative) < number_of_relatives:
+                    descendants = []
+                    # Initialising the list in a loop because this will help reduce the search space.
+                    # A great grand parent will have all the child nodes that a grand parent or a parent has.
                     parents.pop()
                     gp = parents[-1]
-                    print("gp", gp)
-                    desc = get_children(gp)
-                    print("descendants", desc)
-                    tips = get_all_descendants(desc) #I need to get desc of tips,
-                    #This logic is fine for the first gp, but when we go to the parent of this gp I will again miss the tips 
-                    #because of which I am getting very few relatives. 
-                    print("All descendents", tips)
-                    get_gp_rel = match_input_and_cluster_proteins(unique_tax_ids, tips, relative)
-                    print("The tax ids of the genomes that are present in the cluster and in ensembl (gp)", relative) 
-                    if gp == 1:
-                        print("Root reached")
-                        get_rel_root = match_input_and_cluster_proteins(unique_tax_ids, tips)
-                        #root_desc = get_children(gp)
-                        #print("Closest relatives", (cluster_id, relative))
-                        #print("The tax ids of the genomes that are present in the cluster and in ensembl (gp)", relative)
-                        #print("Relatives:", target, ":", cluster_id, relative)
-                        break
-                if len(relative) >= number_of_relatives:
-                    print("Relatives:", target, ":", cluster_id, relative)
-                    break
-                #print("relatives", relative)
-    #print(result_dict)
-    
-    # with open(output_file, 'w') as file:
-    #     for target, data in result_dict.items():
-    #         file.write(f"{target}: {data}\n")
-
-    return result_dict
-
-#output_file = "results.csv"                           
-closest_neighbours = get_closest_rel_within_cluster(5,matched_list, clusters)
-#print(closest_neighbours)
+                    all_desc = get_all_desc(gp, descendants)
+                    print(len(descendants))
+                    get_gp_rel = match_input_and_cluster_proteins(
+                        unique_tax_ids, descendants, relative, number_of_relatives, proteins, target, output, input_pep_files
+                    )
+                    print(
+                        "The tax ids of the genomes that are present in the cluster and in ensembl (gp)",
+                        relative,
+                    )
+                    if gp == lca:
+                        print("LCA reached")
+                        print(
+                            "Relatives:",
+                            target,
+                            ":",
+                            cluster_id,
+                            relative,
+                        )
+                        
+    return
